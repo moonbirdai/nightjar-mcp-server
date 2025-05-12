@@ -10,6 +10,13 @@ A Model Context Protocol (MCP) server for analyzing Adobe Launch/Tags implementa
 - AI-powered analysis of implementation components (with OpenAI API key)
 - Works seamlessly with Claude Desktop and other MCP clients
 
+## Recent Fixes
+
+- **Enhanced Rule Parsing**: Completely redesigned rule parsing logic using direct pattern matching to reliably extract rules from Adobe Launch embed codes.
+- **Robust Extraction Algorithm**: Now uses targeted pattern recognition to find rules by their ID and name patterns, ensuring reliable extraction even with complex Launch configurations.
+- **Improved Data Capture**: Better extraction of rule events, conditions, actions, and custom code.
+- **Enhanced Debugging**: Added detailed logging for troubleshooting and diagnostics.
+
 ## Installation
 
 ### Quick Install
@@ -114,6 +121,30 @@ analyze_rule:
   use_ai: true
 ```
 
+## Testing
+
+To run the tests:
+
+```bash
+# Test rule extraction with the new approach
+node extract-rules.js
+
+# Test the updated NightjarClient implementation
+node test-new-approach.js
+
+# Run the original test script
+node test-rule-analysis.js
+```
+
+## Troubleshooting
+
+If you encounter issues with rule parsing or other functionality:
+
+1. Run with debug mode: `nightjar-mcp-server --debug`
+2. Check the logs for errors or warnings
+3. Verify that the embed code URL is valid and accessible
+4. Test with the included test scripts to verify functionality
+
 ## Development
 
 To contribute or customize:
@@ -121,6 +152,28 @@ To contribute or customize:
 1. Clone the repository
 2. Install dependencies: `npm install`
 3. Run tests: `npm test`
+4. For debugging, use the dedicated test scripts
+
+## Technical Details
+
+### How Rule Parsing Works
+
+The Nightjar MCP server extracts rules from Adobe Launch embed codes using a completely redesigned approach:
+
+1. Fetches the Launch file using the embed code URL
+2. Uses direct pattern matching to find rules by their ID and name patterns
+3. Extracts complete rule context for each matched rule
+4. Parses rule components (events, conditions, actions, etc.) from the context
+5. Creates a structured representation of the rules for analysis
+
+This new approach is more robust and reliable than the previous method, which relied on complex string splitting and could easily break with different Launch configurations.
+
+### Architecture
+
+The server consists of two main components:
+
+1. **NightjarClient class**: Handles parsing and analysis of Adobe Launch embed codes
+2. **MCP server**: Exposes Nightjar functionality through the Model Context Protocol
 
 ## License
 

@@ -43,9 +43,9 @@ export class NightjarClient {
    * Parse an Adobe Launch embed code
    */
   async parseEmbed(embedCode) {
-    this.log(`Parsing embed code: ${embedCode}`);
-    
     try {
+      this.log(`Parsing embed code: ${embedCode}`);
+      
       // Fetch the Launch file
       const response = await axios.get(embedCode);
       const launchFile = response.data;
@@ -62,6 +62,7 @@ export class NightjarClient {
         if (!launchConfig) {
           throw new Error("Could not find container configuration");
         }
+        this.log(`Launch config extracted, length: ${launchConfig.length} characters`);
       } catch (err) {
         throw new Error("Failed to parse Launch configuration: " + err.message);
       }
@@ -74,6 +75,8 @@ export class NightjarClient {
           const dataElementsSplit = dataElementsSection.split("},extensions:{")[0];
           const dataElementsArray = dataElementsSplit.split("}},");
           
+          this.log(`Found ${dataElementsArray.length} potential data elements`);
+          
           dataElementsArray.forEach((element, index) => {
             if (!element) return;
             
@@ -81,15 +84,17 @@ export class NightjarClient {
             if (matches && matches[1]) {
               const name = matches[1];
               dataElements[name] = element;
+              this.log(`Parsed data element: ${name}`);
             }
           });
         }
+        this.log(`Successfully parsed ${Object.keys(dataElements).length} data elements`);
       } catch (err) {
         this.log("Warning: Error parsing data elements", err);
         dataElements = {};
       }
       
-      // Parse rules
+      // Parse rules - NEW APPROACH
       let rules = {
         names: [],
         events: [],
@@ -100,74 +105,113 @@ export class NightjarClient {
       };
       
       try {
-        let rulesSection = launchConfig.split("rules:[")[1];
-        if (rulesSection) {
-          // Split rules by ID markers
-          rulesSection = rulesSection.split("var _satellite=function()")[0];
-          const ruleList = [];
-          const delimiter = '{"RL';
-          const ruleParts = rulesSection.split(delimiter);
+        // NEW: Direct pattern matching for rules in the entire launch file
+        const rulePattern = /\{(?:id|"id"):"(RL[^"]+)",(?:name|"name"):"([^"]+)"/g;
+        let match;
+        let rulesList = [];
+        
+        this.log('Searching for rules using direct pattern matching...');
+        
+        // Extract all rules with their surrounding context
+        while ((match = rulePattern.exec(launchFile)) !== null) {
+          const ruleId = match[1];
+          const ruleName = match[2];
           
-          for (let i = 1; i < ruleParts.length; i++) {
-            if (ruleParts[i]) {
-              ruleList.push(delimiter + ruleParts[i]);
+          // Get context around the match to extract more rule information
+          const matchIndex = match.index;
+          const contextStart = Math.max(0, matchIndex - 20);
+          const contextEnd = Math.min(launchFile.length, matchIndex + 2000); // Extract a good chunk
+          const context = launchFile.substring(contextStart, contextEnd);
+          
+          rulesList.push({
+            id: ruleId,
+            name: ruleName,
+            context: context
+          });
+          
+          this.log(`Found rule: ${ruleName} (${ruleId})`);
+        }
+        
+        this.log(`Extracted ${rulesList.length} rules`);
+        
+        // Process each rule to extract components
+        rulesList.forEach(rule => {
+          const ruleContext = rule.context;
+          rules.names.push(rule.name);
+          
+          // Extract event type
+          let eventType = "Unknown";
+          const eventMatch = ruleContext.match(/events:\[.*?path:"([^"]+)"/);
+          if (eventMatch && eventMatch[1]) {
+            try {
+              const path = eventMatch[1];
+              const pathParts = path.split('/');
+              const fileName = pathParts[pathParts.length - 1];
+              eventType = fileName.split('.')[0];
+              this.log(`Rule ${rule.name}: Found event type: ${eventType}`);
+            } catch(e) {
+              this.log(`Rule ${rule.name}: Failed to extract event type: ${e.message}`);
             }
           }
+          rules.events.push(eventType);
           
-          // Extract rule components
-          ruleList.forEach(rule => {
+          // Extract conditions (simplified)
+          const hasConditions = ruleContext.includes('conditions:[') && !ruleContext.includes('conditions:[]');
+          rules.conditions.push(hasConditions ? "Has conditions" : "");
+          
+          // Extract actions (simplified)
+          const hasActions = ruleContext.includes('actions:[') && !ruleContext.includes('actions:[]');
+          const actionText = hasActions ? ruleContext.substring(
+            ruleContext.indexOf('actions:['),
+            ruleContext.indexOf(']', ruleContext.indexOf('actions:[')) + 1
+          ) : "";
+          rules.actions.push(actionText);
+          
+          // Extract tracker properties
+          const hasTrackerProps = ruleContext.includes('trackerProperties:');
+          let trackerProps = "";
+          if (hasTrackerProps) {
             try {
-              // Extract name
-              const nameMatch = rule.match(/name:"([^"]+)"/);
-              const name = nameMatch ? nameMatch[1] : "Unknown Rule";
-              rules.names.push(name);
-              
-              // Extract events
-              const eventsMatch = rule.match(/events:\[([^\]]+)\]/);
-              const events = eventsMatch ? eventsMatch[1] : "";
-              // Try to extract event type from path
-              const eventPathMatch = events.match(/path:"([^"]+)"/);
-              const eventPath = eventPathMatch ? eventPathMatch[1].split('/').pop().split('.')[0] : "Unknown";
-              rules.events.push(eventPath);
-              
-              // Extract conditions
-              const conditionsMatch = rule.match(/conditions:\[([^\]]+)\]/);
-              const conditions = conditionsMatch ? conditionsMatch[1] : "";
-              rules.conditions.push(conditions);
-              
-              // Extract actions
-              const actionsMatch = rule.match(/actions:\[([^\]]+)\]/);
-              const actions = actionsMatch ? actionsMatch[1] : "";
-              rules.actions.push(actions);
-              
-              // Extract tracker properties
-              const tpMatch = actions.match(/trackerProperties:({[^}]+})/);
-              rules.trackerProperties.push(tpMatch ? tpMatch[1] : "");
-              
-              // Extract custom code
-              const ccMatch = actions.match(/customCode\.js[^,]+source:"([^"]+)"/);
-              let customCode = "";
-              if (ccMatch && ccMatch[1]) {
-                if (ccMatch[1].startsWith("http")) {
-                  try {
-                    // Try to fetch the custom code if it's a URL
-                    const ccResponse = await axios.get(ccMatch[1]);
-                    customCode = ccResponse.data;
-                  } catch (e) {
-                    customCode = `Could not fetch custom code from ${ccMatch[1]}`;
-                  }
-                } else {
-                  customCode = ccMatch[1];
-                }
-              }
-              rules.customCode.push(customCode);
-            } catch (e) {
-              this.log("Warning: Error parsing rule", e);
+              const tpStart = ruleContext.indexOf('trackerProperties:') + 'trackerProperties:'.length;
+              const tpEnd = ruleContext.indexOf('}', tpStart) + 1;
+              trackerProps = ruleContext.substring(tpStart, tpEnd);
+              this.log(`Rule ${rule.name}: Found tracker properties`);
+            } catch(e) {
+              this.log(`Rule ${rule.name}: Failed to extract tracker properties: ${e.message}`);
             }
-          });
-        }
+          }
+          rules.trackerProperties.push(trackerProps);
+          
+          // Extract custom code
+          const hasCustomCode = ruleContext.includes('customCode.js');
+          let customCode = "";
+          if (hasCustomCode) {
+            try {
+              const ccMatch = ruleContext.match(/customCode\.js[^,]+source:"([^"]+)"/);
+              if (ccMatch && ccMatch[1]) {
+                customCode = ccMatch[1].startsWith("http") ? 
+                  `URL: ${ccMatch[1]} (Use analyze_rule to fetch complete code)` : 
+                  ccMatch[1];
+              }
+              this.log(`Rule ${rule.name}: Found custom code`);
+            } catch(e) {
+              this.log(`Rule ${rule.name}: Failed to extract custom code: ${e.message}`);
+            }
+          }
+          rules.customCode.push(customCode);
+        });
+        
+        this.log(`Successfully processed ${rules.names.length} rules`);
       } catch (err) {
         this.log("Warning: Error parsing rules", err);
+        rules = {
+          names: [],
+          events: [],
+          conditions: [],
+          actions: [],
+          trackerProperties: [],
+          customCode: []
+        };
       }
       
       // Detect variables used in rules
@@ -212,6 +256,8 @@ export class NightjarClient {
         extractVariables(combinedText, 'event', 1001);
       });
       
+      this.log(`Extracted ${Object.keys(variables).length} variables`);
+      
       // Create the parsed data structure
       const parsedData = {
         dataElements,
@@ -233,35 +279,53 @@ export class NightjarClient {
    * Analyze a rule using the parsed embed data
    */
   async analyzeRule(ruleName, useAI = true) {
-    if (!this.parsedEmbed) {
-      throw new Error("Please parse an embed code first using parseEmbed()");
-    }
-    
-    // Find the rule in the parsed data
-    const ruleIndex = this.parsedEmbed.rules.names.indexOf(ruleName);
-    if (ruleIndex === -1) {
-      throw new Error(`Rule '${ruleName}' not found in the parsed embed code`);
-    }
-    
-    // Extract rule details
-    const ruleData = {
-      name: this.parsedEmbed.rules.names[ruleIndex],
-      event: this.parsedEmbed.rules.events[ruleIndex],
-      condition: this.parsedEmbed.rules.conditions[ruleIndex],
-      action: this.parsedEmbed.rules.actions[ruleIndex],
-      trackerProperty: this.parsedEmbed.rules.trackerProperties[ruleIndex],
-      customCode: this.parsedEmbed.rules.customCode[ruleIndex]
-    };
-    
-    if (useAI && this.openAiApiKey && this.openai) {
-      // Use OpenAI to analyze the rule
-      return this.analyzeWithAI(
-        ruleData,
-        `Analyze this Adobe Launch rule named "${ruleName}". Explain what it does, when it fires, and any potential concerns or best practices to consider.`
-      );
-    } else {
-      // Return a simple analysis without AI
-      return `Rule: ${ruleName}
+    try {
+      if (!this.parsedEmbed) {
+        throw new Error("Please parse an embed code first using parseEmbed()");
+      }
+      
+      // Find the rule in the parsed data
+      const ruleIndex = this.parsedEmbed.rules.names.indexOf(ruleName);
+      if (ruleIndex === -1) {
+        throw new Error(`Rule '${ruleName}' not found in the parsed embed code`);
+      }
+      
+      // Extract rule details
+      const ruleData = {
+        name: this.parsedEmbed.rules.names[ruleIndex],
+        event: this.parsedEmbed.rules.events[ruleIndex],
+        condition: this.parsedEmbed.rules.conditions[ruleIndex],
+        action: this.parsedEmbed.rules.actions[ruleIndex],
+        trackerProperty: this.parsedEmbed.rules.trackerProperties[ruleIndex],
+        customCode: this.parsedEmbed.rules.customCode[ruleIndex]
+      };
+      
+      // Check if we need to fetch the custom code from a URL
+      if (ruleData.customCode && ruleData.customCode.startsWith('URL:')) {
+        try {
+          const urlMatch = ruleData.customCode.match(/URL: (.*?)(?:\s|$)/);
+          if (urlMatch && urlMatch[1]) {
+            const url = urlMatch[1];
+            const response = await axios.get(url);
+            ruleData.customCode = response.data;
+            // Also update it in the parsed data for future use
+            this.parsedEmbed.rules.customCode[ruleIndex] = response.data;
+          }
+        } catch (e) {
+          this.log(`Failed to fetch custom code: ${e.message}`);
+          ruleData.customCode += ` (Failed to fetch: ${e.message})`;
+        }
+      }
+      
+      if (useAI && this.openAiApiKey && this.openai) {
+        // Use OpenAI to analyze the rule
+        return this.analyzeWithAI(
+          ruleData,
+          `Analyze this Adobe Launch rule named "${ruleName}". Explain what it does, when it fires, and any potential concerns or best practices to consider.`
+        );
+      } else {
+        // Return a simple analysis without AI
+        return `Rule: ${ruleName}
 Event Trigger: ${ruleData.event || 'Unknown'}
 Condition: ${this.summarizeCondition(ruleData.condition)}
 Action Summary: ${this.summarizeAction(ruleData.action)}
@@ -269,6 +333,10 @@ Uses Tracker Properties: ${ruleData.trackerProperty ? 'Yes' : 'No'}
 Has Custom Code: ${ruleData.customCode ? 'Yes' : 'No'}
 
 ${ruleData.customCode ? `\nCustom Code Preview: \n${ruleData.customCode.substring(0, 200)}${ruleData.customCode.length > 200 ? '...' : ''}` : ''}`;
+      }
+    } catch (error) {
+      this.log(`Error analyzing rule: ${error.message}`);
+      throw error;
     }
   }
 
@@ -276,56 +344,61 @@ ${ruleData.customCode ? `\nCustom Code Preview: \n${ruleData.customCode.substrin
    * Analyze a data element
    */
   async analyzeDataElement(elementName, useAI = true) {
-    if (!this.parsedEmbed) {
-      throw new Error("Please parse an embed code first using parseEmbed()");
-    }
-    
-    // Find the data element in the parsed data
-    if (!this.parsedEmbed.dataElements[elementName]) {
-      throw new Error(`Data element '${elementName}' not found in the parsed embed code`);
-    }
-    
-    const elementData = this.parsedEmbed.dataElements[elementName];
-    
-    // Extract data element type and settings
-    let elementType = "Unknown";
-    let elementSettings = "";
-    
-    // Try to identify the type
-    if (elementData.includes('modulePath:')) {
-      const moduleMatch = elementData.match(/modulePath:"([^"]+)"/);
-      if (moduleMatch) {
-        elementType = moduleMatch[1].split('/').pop();
+    try {
+      if (!this.parsedEmbed) {
+        throw new Error("Please parse an embed code first using parseEmbed()");
       }
-    }
-    
-    // Check for common types
-    const typeChecks = {
-      "constant": /defaultValue/,
-      "localStorage": /storageDuration/,
-      "customCode": /customCode/,
-      "jsVariable": /path:/,
-      "domElement": /elementSelector/,
-      "cookieValue": /cookieName/
-    };
-    
-    Object.entries(typeChecks).forEach(([type, regex]) => {
-      if (regex.test(elementData)) {
-        elementType = type;
+      
+      // Find the data element in the parsed data
+      if (!this.parsedEmbed.dataElements[elementName]) {
+        throw new Error(`Data element '${elementName}' not found in the parsed embed code`);
       }
-    });
-    
-    if (useAI && this.openAiApiKey && this.openai) {
-      // Use OpenAI to analyze the data element
-      return this.analyzeWithAI(
-        { name: elementName, raw: elementData, type: elementType },
-        `Analyze this Adobe Launch data element named "${elementName}". Explain what type of data element it is, what data it collects, and any potential concerns or best practices to consider.`
-      );
-    } else {
-      // Return a simple analysis without AI
-      return `Data Element: ${elementName}
+      
+      const elementData = this.parsedEmbed.dataElements[elementName];
+      
+      // Extract data element type and settings
+      let elementType = "Unknown";
+      let elementSettings = "";
+      
+      // Try to identify the type
+      if (elementData.includes('modulePath:')) {
+        const moduleMatch = elementData.match(/modulePath:"([^"]+)"/);
+        if (moduleMatch) {
+          elementType = moduleMatch[1].split('/').pop();
+        }
+      }
+      
+      // Check for common types
+      const typeChecks = {
+        "constant": /defaultValue/,
+        "localStorage": /storageDuration/,
+        "customCode": /customCode/,
+        "jsVariable": /path:/,
+        "domElement": /elementSelector/,
+        "cookieValue": /cookieName/
+      };
+      
+      Object.entries(typeChecks).forEach(([type, regex]) => {
+        if (regex.test(elementData)) {
+          elementType = type;
+        }
+      });
+      
+      if (useAI && this.openAiApiKey && this.openai) {
+        // Use OpenAI to analyze the data element
+        return this.analyzeWithAI(
+          { name: elementName, raw: elementData, type: elementType },
+          `Analyze this Adobe Launch data element named "${elementName}". Explain what type of data element it is, what data it collects, and any potential concerns or best practices to consider.`
+        );
+      } else {
+        // Return a simple analysis without AI
+        return `Data Element: ${elementName}
 Type: ${elementType}
 Raw Definition: ${elementData.substring(0, 200)}${elementData.length > 200 ? '...' : ''}`;
+      }
+    } catch (error) {
+      this.log(`Error analyzing data element: ${error.message}`);
+      throw error;
     }
   }
 
@@ -333,56 +406,61 @@ Raw Definition: ${elementData.substring(0, 200)}${elementData.length > 200 ? '..
    * Analyze how an Adobe Analytics variable is used
    */
   async analyzeVariable(variableName, useAI = true) {
-    if (!this.parsedEmbed) {
-      throw new Error("Please parse an embed code first using parseEmbed()");
-    }
-    
-    // Find the variable in the parsed data
-    if (!this.parsedEmbed.variables[variableName]) {
-      throw new Error(`Variable '${variableName}' not found in the parsed embed code`);
-    }
-    
-    const usedInRules = this.parsedEmbed.variables[variableName];
-    
-    // Gather details about where the variable is used
-    const usageDetails = usedInRules.map((ruleName, index) => {
-      const ruleIndex = this.parsedEmbed.rules.names.indexOf(ruleName);
-      if (ruleIndex === -1) return `Rule: ${ruleName} (details not available)`;
-      
-      const trackerProperty = this.parsedEmbed.rules.trackerProperties[ruleIndex];
-      const customCode = this.parsedEmbed.rules.customCode[ruleIndex];
-      
-      let usageLocation = [];
-      if (trackerProperty && trackerProperty.includes(variableName)) {
-        usageLocation.push("Tracker Properties");
-      }
-      if (customCode && customCode.includes(variableName)) {
-        usageLocation.push("Custom Code");
+    try {
+      if (!this.parsedEmbed) {
+        throw new Error("Please parse an embed code first using parseEmbed()");
       }
       
-      return `Rule: ${ruleName}
+      // Find the variable in the parsed data
+      if (!this.parsedEmbed.variables[variableName]) {
+        throw new Error(`Variable '${variableName}' not found in the parsed embed code`);
+      }
+      
+      const usedInRules = this.parsedEmbed.variables[variableName];
+      
+      // Gather details about where the variable is used
+      const usageDetails = usedInRules.map((ruleName, index) => {
+        const ruleIndex = this.parsedEmbed.rules.names.indexOf(ruleName);
+        if (ruleIndex === -1) return `Rule: ${ruleName} (details not available)`;
+        
+        const trackerProperty = this.parsedEmbed.rules.trackerProperties[ruleIndex];
+        const customCode = this.parsedEmbed.rules.customCode[ruleIndex];
+        
+        let usageLocation = [];
+        if (trackerProperty && trackerProperty.includes(variableName)) {
+          usageLocation.push("Tracker Properties");
+        }
+        if (customCode && customCode.includes(variableName)) {
+          usageLocation.push("Custom Code");
+        }
+        
+        return `Rule: ${ruleName}
 Usage Location: ${usageLocation.join(', ') || 'Unknown'}
 Event Trigger: ${this.parsedEmbed.rules.events[ruleIndex] || 'Unknown'}`;
-    });
-    
-    if (useAI && this.openAiApiKey && this.openai) {
-      // Use OpenAI to analyze the variable usage
-      return this.analyzeWithAI(
-        { 
-          name: variableName, 
-          usedInRules, 
-          usageDetails,
-          variableType: variableName.startsWith('eVar') ? 'eVar' : 
-                        variableName.startsWith('prop') ? 'prop' : 
-                        variableName.startsWith('event') ? 'event' : 'other'
-        },
-        `Analyze how the Adobe Analytics variable "${variableName}" is used across rules in this implementation. Explain its purpose, what kind of data it likely captures, and any potential concerns or best practices to consider.`
-      );
-    } else {
-      // Return a simple analysis without AI
-      return `Variable: ${variableName}
+      });
+      
+      if (useAI && this.openAiApiKey && this.openai) {
+        // Use OpenAI to analyze the variable usage
+        return this.analyzeWithAI(
+          { 
+            name: variableName, 
+            usedInRules, 
+            usageDetails,
+            variableType: variableName.startsWith('eVar') ? 'eVar' : 
+                          variableName.startsWith('prop') ? 'prop' : 
+                          variableName.startsWith('event') ? 'event' : 'other'
+          },
+          `Analyze how the Adobe Analytics variable "${variableName}" is used across rules in this implementation. Explain its purpose, what kind of data it likely captures, and any potential concerns or best practices to consider.`
+        );
+      } else {
+        // Return a simple analysis without AI
+        return `Variable: ${variableName}
 Used in ${usedInRules.length} rules:
 ${usageDetails.join('\n\n')}`;
+      }
+    } catch (error) {
+      this.log(`Error analyzing variable: ${error.message}`);
+      throw error;
     }
   }
 
@@ -391,7 +469,6 @@ ${usageDetails.join('\n\n')}`;
    */
   async extractEmbedFromUrl(url) {
     this.log(`Extracting embed code from URL: ${url}`);
-    
     try {
       // Fetch the HTML page
       const response = await axios.get(url);
